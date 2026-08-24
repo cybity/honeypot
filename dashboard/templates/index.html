@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Honeypot Command Center</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e;
+  --accent: #58a6ff; --green: #3fb950; --red: #f85149; --purple: #bc8cff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace; font-size: 14px;
+}
+header { padding: 18px 28px; border-bottom: 1px solid var(--border);
+         display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 17px; margin: 0; letter-spacing: .5px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green);
+       box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 50% { opacity: .4; } }
+#updated { margin-left: auto; color: var(--muted); font-size: 12px; }
+main { padding: 20px 28px; max-width: 1400px; margin: 0 auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+         gap: 14px; margin-bottom: 20px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px 16px; }
+.card .num { font-size: 26px; font-weight: 700; color: var(--accent); }
+.card:nth-child(2) .num { color: var(--red); }
+.card:nth-child(3) .num { color: var(--green); }
+.card:nth-child(5) .num { color: var(--purple); }
+.card .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase;
+             letter-spacing: 1px; margin-top: 4px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+         padding: 16px; min-width: 0; }
+.panel.wide { grid-column: 1 / -1; }
+.panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase;
+            letter-spacing: 1.2px; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+         overflow-wrap: anywhere; }
+th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+tr:last-child td { border-bottom: 0; }
+td.cnt, th.cnt { text-align: right; width: 60px; color: var(--accent); }
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+         border: 1px solid var(--border); }
+.badge.connection, .badge.disconnect { color: var(--muted); }
+.badge.auth, .badge.login { color: var(--red); border-color: var(--red); }
+.badge.command { color: var(--green); border-color: var(--green); }
+.badge.download { color: var(--purple); border-color: var(--purple); }
+.badge.http_request { color: var(--accent); border-color: var(--accent); }
+.muted { color: var(--muted); }
+canvas { max-height: 260px; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot"></div>
+  <h1>HONEYPOT COMMAND CENTER</h1>
+  <span id="updated">waiting for data...</span>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+
+  <div class="grid">
+    <div class="panel wide"><h2>Activity - last 24h</h2><canvas id="timeline"></canvas></div>
+    <div class="panel"><h2>Top passwords</h2><canvas id="passwords"></canvas></div>
+    <div class="panel"><h2>Top attacker IPs</h2><canvas id="ips"></canvas></div>
+    <div class="panel wide"><h2>Recent activity</h2>
+      <div class="scrollbox"><table>
+        <thead><tr><th>Time</th><th>Kind</th><th>Service</th><th>Source</th><th>User</th><th>Detail</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const el = (id) => document.getElementById(id);
+const esc = (s) => s == null ? "" : String(s);
+
+let timelineChart = null, pwChart = null, ipChart = null;
+
+function makeBar(ctx, labels, values, color) {
+  return new Chart(ctx, {
+    type: "bar",
+    data: { labels, datasets: [{ data: values, backgroundColor: color,
+                                 borderRadius: 3, barThickness: 14 }] },
+    options: { indexAxis: "y", plugins: { legend: { display: false } },
+               scales: { x: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+                         y: { ticks: { color: "#e6edf3" }, grid: { display: false } } } }
+  });
+}
+
+function renderCards(t) {
+  const items = [
+    ["Connections", t.connections], ["Unique attackers", t.unique_ips],
+    ["Auth attempts", t.auth_attempts], ["Logins captured", t.logins],
+    ["Commands run", t.commands], ["Downloads attempted", t.downloads],
+    ["HTTP requests", t.http_requests],
+  ];
+  el("cards").innerHTML = items.map(([l, v]) =>
+    `<div class="card"><div class="num">${esc(v)}</div><div class="lbl">${esc(l)}</div></div>`
+  ).join("");
+}
+
+async function refresh() {
+  try {
+    const stats = await (await fetch("/api/stats")).json();
+    const ev = await (await fetch("/api/events")).json();
+    renderCards(stats.totals);
+
+    if (window.Chart) {
+      const tl = stats.timeline || [];
+      if (!timelineChart && tl.length) {
+        timelineChart = new Chart(el("timeline"), {
+          type: "line",
+          data: { datasets: [{ borderColor: "#58a6ff", backgroundColor: "#58a6ff33",
+                               fill: true, tension: .3, pointRadius: 3 }] },
+          options: { plugins: { legend: { display: false } },
+                     scales: { x: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+                               y: { beginAtZero: true, ticks: { color: "#8b949e", precision: 0 },
+                                    grid: { color: "#21262d" } } } }
+        });
+      }
+      if (timelineChart) {
+        timelineChart.data.labels = tl.map(d => d.hour.slice(5, 16));
+        timelineChart.data.datasets[0].data = tl.map(d => d.count);
+        timelineChart.update("none");
+      }
+
+      const mk = (chartId, rows, color) => {
+        const existing = Chart.getChart(chartId);
+        if (existing) existing.destroy();
+        return makeBar(document.getElementById(chartId).getContext("2d"),
+                       rows.map(r => r.label), rows.map(r => r.count), color);
+      };
+      pwChart = mk("passwords", (stats.top_passwords || []).slice(0, 8), "#f85149");
+      ipChart = mk("ips", (stats.top_ips || []).slice(0, 8), "#58a6ff");
+    }
+
+    el("events").innerHTML = (ev.events || []).map(e => `
+      <tr>
+        <td class="muted">${esc(e.ts)}</td>
+        <td><span class="badge ${esc(e.kind)}">${esc(e.kind)}</span></td>
+        <td>${esc(e.service || "")}</td>
+        <td>${esc(e.src_ip || "")}${e.src_port ? ":" + e.src_port : ""}</td>
+        <td>${esc(e.username || "")}</td>
+        <td>${esc(e.detail || "")}</td>
+      </tr>`).join("");
+
+    el("updated").textContent = "live - updated " + new Date().toLocaleTimeString();
+  } catch (err) {
+    el("updated").textContent = "connection lost";
+  }
+}
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>
